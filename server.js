@@ -60,11 +60,14 @@ function resolveVote(code) {
   console.log(`Eliminated: ${eliminated?.name} (${eliminated?.role}). Alive: ${aliveMafia} mafia, ${aliveCivilians} civilians`)
 
   if (aliveMafia === 0) {
+    room.lastResult = { event: 'game_over', data: { winner: 'civilians', eliminated } }
     io.to(code).emit('game_over', { winner: 'civilians', eliminated })
   } else if (aliveMafia >= aliveCivilians) {
+    room.lastResult = { event: 'game_over', data: { winner: 'mafia', eliminated } }
     io.to(code).emit('game_over', { winner: 'mafia', eliminated })
   } else {
     room.round++
+    room.lastResult = { event: 'player_eliminated', data: { eliminated, round: room.round } }
     io.to(code).emit('player_eliminated', { eliminated, round: room.round })
   }
 }
@@ -162,6 +165,15 @@ io.on('connection', (socket) => {
   socket.on('cast_vote', ({ code, votedId }) => {
     const room = rooms[code]
     if (!room) return
+    
+    // If already resolved, re-send the last result to this socket
+    if (room.state === 'resolving' || room.state === 'round' || room.state === 'roleReveal') {
+      if (room.lastResult) {
+        socket.emit(room.lastResult.event, room.lastResult.data)
+      }
+      return
+    }
+    
     if (room.state !== 'voting') return
     if (room.votes[socket.id] !== undefined) return
 
@@ -170,11 +182,13 @@ io.on('connection', (socket) => {
     const alivePlayers = room.assignedPlayers.filter(p => p.alive)
     const totalVotes = Object.keys(room.votes).length
 
-    io.to(code).emit('vote_update', {
-      totalVotes,
-      needed: alivePlayers.length
-    })
+    io.to(code).emit('vote_update', { totalVotes, needed: alivePlayers.length })
+    console.log(`Vote in ${code}: ${totalVotes}/${alivePlayers.length}`)
 
+    if (totalVotes >= alivePlayers.length) {
+      setTimeout(() => resolveVote(code), 1000)
+    }
+  })
     console.log(`Vote in ${code}: ${totalVotes}/${alivePlayers.length}`)
 
     if (totalVotes >= alivePlayers.length) { 
