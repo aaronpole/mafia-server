@@ -91,10 +91,13 @@ io.on('connection', (socket) => {
   })
 
   socket.on('start_round', ({ code }) => {
-    const room = rooms[code]
-    if (!room) return
-    room.state = 'round'
-    io.to(code).emit('round_started', { round: room.round })
+      const room = rooms[code]
+      if (!room) return
+      room.state = 'round'
+      io.to(code).emit('round_started', { 
+        round: room.round,
+        alivePlayers: room.assignedPlayers.filter(p => p.alive)
+      })
   })
 
   socket.on('start_vote', ({ code }) => {
