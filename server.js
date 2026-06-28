@@ -84,25 +84,25 @@ io.on('connection', (socket) => {
   console.log('Connected:', socket.id)
 
   // Reconnection — player rejoins with their name and room code
+  socket.on('request_lobby', ({ code }) => {
+    const room = rooms[code]
+    if (!room) return
+    socket.emit('lobby_update', room.players)
+  })
   socket.on('reconnect_player', ({ code, playerName }) => {
     const room = rooms[code]
     if (!room) { socket.emit('join_error', 'Room not found'); return }
 
-    // Find existing player by name
     const existingPlayer = room.players.find(p => p.name === playerName)
     if (existingPlayer) {
-      // Update their socket ID
       const oldSocketId = existingPlayer.id
       existingPlayer.id = socket.id
 
-      // Update in assignedPlayers too
       const assigned = room.assignedPlayers.find(p => p.socketId === oldSocketId || p.name === playerName)
       if (assigned) assigned.socketId = socket.id
 
-      // Update host if needed
       if (room.host === oldSocketId) room.host = socket.id
 
-      // Clear delete timeout if host reconnected
       if (room.deleteTimeout) {
         clearTimeout(room.deleteTimeout)
         room.deleteTimeout = null
@@ -111,7 +111,7 @@ io.on('connection', (socket) => {
       socket.join(code)
       console.log(`${playerName} reconnected to ${code}`)
 
-      // Send them current game state
+      // Send current state
       socket.emit('reconnected', {
         state: room.state,
         assignedPlayers: room.assignedPlayers,
@@ -122,8 +122,11 @@ io.on('connection', (socket) => {
         lastResult: room.lastResult
       })
 
-      // Re-send their role
-      if (assigned) {
+      // Always send lobby update so host sees current players
+      socket.emit('lobby_update', room.players)
+
+      // Re-send role if game started
+      if (assigned && room.state !== 'lobby') {
         const mafiaTeam = room.assignedPlayers
           .filter(p => p.role === 'mafia')
           .map(p => p.name)
@@ -134,11 +137,24 @@ io.on('connection', (socket) => {
           mafiaTeam: assigned.role === 'mafia' ? mafiaTeam : []
         })
       }
+
+      // If voting is active, re-send vote state
+      if (room.state === 'voting') {
+        socket.emit('vote_started', {
+          alivePlayers: room.assignedPlayers.filter(p => p.alive),
+          startTime: room.voteStartTime,
+          duration: 15 * 1000
+        })
+      }
+
+      // If game already resolved, send last result
+      if (room.lastResult) {
+        socket.emit(room.lastResult.event, room.lastResult.data)
+      }
     } else {
       socket.emit('join_error', 'Player not found in room')
     }
   })
-
   socket.on('create_room', ({ hostName }) => {
     const code = generateRoomCode()
     rooms[code] = {
@@ -212,6 +228,7 @@ io.on('connection', (socket) => {
       })
       return
     }
+    
     room.state = 'round'
     room.roundStartTime = Date.now()
     room.votes = {}
