@@ -27,7 +27,6 @@ function assignRoles(players) {
     const j = Math.floor(Math.random() * (i + 1));
     [roles[i], roles[j]] = [roles[j], roles[i]]
   }
-  // players is array of {id, name, isHost} objects
   return players.map((player, i) => ({
     socketId: player.id,
     name: player.name,
@@ -35,6 +34,39 @@ function assignRoles(players) {
     alive: true,
     id: i
   }))
+}
+
+function resolveVote(code) {
+  const room = rooms[code]
+  if (!room || room.state !== 'voting') return
+  room.state = 'resolving'
+
+  const tally = {}
+  Object.values(room.votes).forEach(id => {
+    tally[id] = (tally[id] || 0) + 1
+  })
+
+  const eliminatedId = Number(
+    Object.entries(tally).sort((a, b) => b[1] - a[1])[0][0]
+  )
+  const eliminated = room.assignedPlayers.find(p => p.id === eliminatedId)
+  if (eliminated) eliminated.alive = false
+  room.votes = {}
+
+  const alive = room.assignedPlayers.filter(p => p.alive)
+  const aliveMafia = alive.filter(p => p.role === 'mafia').length
+  const aliveCivilians = alive.filter(p => p.role === 'civilian').length
+
+  console.log(`Eliminated: ${eliminated?.name} (${eliminated?.role}). Alive: ${aliveMafia} mafia, ${aliveCivilians} civilians`)
+
+  if (aliveMafia === 0) {
+    io.to(code).emit('game_over', { winner: 'civilians', eliminated })
+  } else if (aliveMafia >= aliveCivilians) {
+    io.to(code).emit('game_over', { winner: 'mafia', eliminated })
+  } else {
+    room.round++
+    io.to(code).emit('player_eliminated', { eliminated, round: room.round })
+  }
 }
 
 io.on('connection', (socket) => {
@@ -72,8 +104,6 @@ io.on('connection', (socket) => {
   socket.on('start_game', ({ code }) => {
     const room = rooms[code]
     if (!room || room.host !== socket.id) return
-
-    // Pass full player objects so we get socketId in assigned roles
     const assigned = assignRoles(room.players)
     room.assignedPlayers = assigned
     room.state = 'roleReveal'
@@ -82,7 +112,6 @@ io.on('connection', (socket) => {
       .filter(p => p.role === 'mafia')
       .map(p => p.name)
 
-    // Send each real player their private role by socketId
     assigned.forEach((assignedPlayer) => {
       io.to(assignedPlayer.socketId).emit('role_assigned', {
         role: assignedPlayer.role,
@@ -92,7 +121,6 @@ io.on('connection', (socket) => {
       })
     })
 
-    // Send full assigned list to everyone so each device can find their role
     io.to(code).emit('game_started', { assignedPlayers: assigned })
     console.log(`Game started in ${code}`)
   })
@@ -100,14 +128,24 @@ io.on('connection', (socket) => {
   socket.on('start_round', ({ code }) => {
     const room = rooms[code]
     if (!room) return
+    // Only start the timer once — ignore duplicate start_round from other tabs
+    if (room.state === 'round' && room.roundStartTime) {
+      // Re-send current state to this socket so they sync up
+      socket.emit('round_started', {
+        round: room.round,
+        startTime: room.roundStartTime,
+        duration: 5 * 60 * 1000,
+        alivePlayers: room.assignedPlayers.filter(p => p.alive)
+      })
+      return
+    }
     room.state = 'round'
-    // Store server start time for sync
     room.roundStartTime = Date.now()
     room.votes = {}
     io.to(code).emit('round_started', {
       round: room.round,
       startTime: room.roundStartTime,
-      duration: 5 * 60 * 1000, // 5 minutes in ms
+      duration: 5 * 60 * 1000,
       alivePlayers: room.assignedPlayers.filter(p => p.alive)
     })
   })
@@ -125,27 +163,21 @@ io.on('connection', (socket) => {
     const room = rooms[code]
     if (!room) return
     if (room.state !== 'voting') return
-    // Only count one vote per socket
     if (room.votes[socket.id] !== undefined) return
 
     room.votes[socket.id] = Number(votedId)
 
     const alivePlayers = room.assignedPlayers.filter(p => p.alive)
-    // Only count votes from real connected players (not fake/disconnected)
-    const connectedAlive = alivePlayers.filter(p =>
-      io.sockets.sockets.has(p.socketId)
-    )
     const totalVotes = Object.keys(room.votes).length
 
     io.to(code).emit('vote_update', {
       totalVotes,
-      needed: connectedAlive.length
+      needed: alivePlayers.length
     })
 
-    console.log(`Vote cast in ${code}: ${totalVotes}/${connectedAlive.length}`)
+    console.log(`Vote in ${code}: ${totalVotes}/${alivePlayers.length}`)
 
-    // Resolve when all connected alive players have voted
-    if (totalVotes >= connectedAlive.length) {
+    if (totalVotes >= alivePlayers.length) {
       resolveVote(code)
     }
   })
@@ -161,54 +193,10 @@ io.on('connection', (socket) => {
         delete rooms[code]
       } else {
         io.to(code).emit('lobby_update', room.players)
-        // If voting and a player disconnected, re-check if all remaining voted
-        if (room.state === 'voting') {
-          const alivePlayers = room.assignedPlayers.filter(p => p.alive)
-          const connectedAlive = alivePlayers.filter(p =>
-            io.sockets.sockets.has(p.socketId)
-          )
-          const totalVotes = Object.keys(room.votes || {}).length
-          if (connectedAlive.length > 0 && totalVotes >= connectedAlive.length) {
-            resolveVote(code)
-          }
-        }
       }
     }
   })
 })
-
-function resolveVote(code) {
-  const room = rooms[code]
-  if (!room || room.state !== 'voting') return
-  room.state = 'resolving'
-
-  const tally = {}
-  Object.values(room.votes).forEach(id => {
-    tally[id] = (tally[id] || 0) + 1
-  })
-
-  const eliminatedId = Number(
-    Object.entries(tally).sort((a, b) => b[1] - a[1])[0][0]
-  )
-  const eliminated = room.assignedPlayers.find(p => p.id === eliminatedId)
-  if (eliminated) eliminated.alive = false
-  room.votes = {}
-
-  const alive = room.assignedPlayers.filter(p => p.alive)
-  const aliveMafia = alive.filter(p => p.role === 'mafia').length
-  const aliveCivilians = alive.filter(p => p.role === 'civilian').length
-
-  console.log(`Eliminated: ${eliminated?.name} (${eliminated?.role}). Alive: ${aliveMafia} mafia, ${aliveCivilians} civilians`)
-
-  if (aliveMafia === 0) {
-    io.to(code).emit('game_over', { winner: 'civilians', eliminated })
-  } else if (aliveMafia >= aliveCivilians) {
-    io.to(code).emit('game_over', { winner: 'mafia', eliminated })
-  } else {
-    room.round++
-    io.to(code).emit('player_eliminated', { eliminated, round: room.round })
-  }
-}
 
 const PORT = process.env.PORT || 3001
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`))
