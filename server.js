@@ -134,7 +134,7 @@ io.on('connection', (socket) => {
       socket.emit('round_started', {
         round: room.round,
         startTime: room.roundStartTime,
-        duration: 10 * 1000,
+        duration: 5 * 60 * 1000,
         alivePlayers: room.assignedPlayers.filter(p => p.alive)
       })
       return
@@ -145,7 +145,7 @@ io.on('connection', (socket) => {
     io.to(code).emit('round_started', {
       round: room.round,
       startTime: room.roundStartTime,
-      duration: 10 * 1000,
+      duration: 5 * 60 * 1000,
       alivePlayers: room.assignedPlayers.filter(p => p.alive)
     })
   })
