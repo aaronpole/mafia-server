@@ -41,16 +41,24 @@ function resolveVote(code) {
   if (!room || room.state !== 'voting') return
   room.state = 'resolving'
 
+  if (room.voteTimer) {
+    clearTimeout(room.voteTimer)
+    room.voteTimer = null
+  }
+
   const tally = {}
   Object.values(room.votes).forEach(id => {
     tally[id] = (tally[id] || 0) + 1
   })
 
-  const eliminatedId = Number(
-    Object.entries(tally).sort((a, b) => b[1] - a[1])[0][0]
-  )
-  const eliminated = room.assignedPlayers.find(p => p.id === eliminatedId)
-  if (eliminated) eliminated.alive = false
+  let eliminated = null
+  if (Object.keys(tally).length > 0) {
+    const eliminatedId = Number(
+      Object.entries(tally).sort((a, b) => b[1] - a[1])[0][0]
+    )
+    eliminated = room.assignedPlayers.find(p => p.id === eliminatedId)
+    if (eliminated) eliminated.alive = false
+  }
   room.votes = {}
 
   const alive = room.assignedPlayers.filter(p => p.alive)
@@ -75,6 +83,62 @@ function resolveVote(code) {
 io.on('connection', (socket) => {
   console.log('Connected:', socket.id)
 
+  // Reconnection — player rejoins with their name and room code
+  socket.on('reconnect_player', ({ code, playerName }) => {
+    const room = rooms[code]
+    if (!room) { socket.emit('join_error', 'Room not found'); return }
+
+    // Find existing player by name
+    const existingPlayer = room.players.find(p => p.name === playerName)
+    if (existingPlayer) {
+      // Update their socket ID
+      const oldSocketId = existingPlayer.id
+      existingPlayer.id = socket.id
+
+      // Update in assignedPlayers too
+      const assigned = room.assignedPlayers.find(p => p.socketId === oldSocketId || p.name === playerName)
+      if (assigned) assigned.socketId = socket.id
+
+      // Update host if needed
+      if (room.host === oldSocketId) room.host = socket.id
+
+      // Clear delete timeout if host reconnected
+      if (room.deleteTimeout) {
+        clearTimeout(room.deleteTimeout)
+        room.deleteTimeout = null
+      }
+
+      socket.join(code)
+      console.log(`${playerName} reconnected to ${code}`)
+
+      // Send them current game state
+      socket.emit('reconnected', {
+        state: room.state,
+        assignedPlayers: room.assignedPlayers,
+        round: room.round,
+        roundStartTime: room.roundStartTime,
+        duration: 5 * 60 * 1000,
+        voteStartTime: room.voteStartTime,
+        lastResult: room.lastResult
+      })
+
+      // Re-send their role
+      if (assigned) {
+        const mafiaTeam = room.assignedPlayers
+          .filter(p => p.role === 'mafia')
+          .map(p => p.name)
+        socket.emit('role_assigned', {
+          role: assigned.role,
+          name: assigned.name,
+          socketId: assigned.socketId,
+          mafiaTeam: assigned.role === 'mafia' ? mafiaTeam : []
+        })
+      }
+    } else {
+      socket.emit('join_error', 'Player not found in room')
+    }
+  })
+
   socket.on('create_room', ({ hostName }) => {
     const code = generateRoomCode()
     rooms[code] = {
@@ -85,8 +149,11 @@ io.on('connection', (socket) => {
       round: 1,
       assignedPlayers: [],
       roundStartTime: null,
+      voteStartTime: null,
+      voteTimer: null,
       votes: {},
-      lastResult: null
+      lastResult: null,
+      deleteTimeout: null
     }
     socket.join(code)
     socket.emit('room_created', { code })
@@ -98,6 +165,12 @@ io.on('connection', (socket) => {
     const room = rooms[code]
     if (!room) { socket.emit('join_error', 'Room not found'); return }
     if (room.state !== 'lobby') { socket.emit('join_error', 'Game already started'); return }
+
+    if (room.deleteTimeout) {
+      clearTimeout(room.deleteTimeout)
+      room.deleteTimeout = null
+    }
+
     room.players.push({ id: socket.id, name: playerName, isHost: false })
     socket.join(code)
     socket.emit('room_joined', { code, players: room.players })
@@ -112,9 +185,7 @@ io.on('connection', (socket) => {
     room.assignedPlayers = assigned
     room.state = 'roleReveal'
 
-    const mafiaTeam = assigned
-      .filter(p => p.role === 'mafia')
-      .map(p => p.name)
+    const mafiaTeam = assigned.filter(p => p.role === 'mafia').map(p => p.name)
 
     assigned.forEach((assignedPlayer) => {
       io.to(assignedPlayer.socketId).emit('role_assigned', {
@@ -155,19 +226,37 @@ io.on('connection', (socket) => {
   socket.on('start_vote', ({ code }) => {
     const room = rooms[code]
     if (!room) return
-    if (room.state === 'voting') return // prevent double trigger
+    if (room.state === 'voting') {
+      // Reconnecting player — send them current vote state
+      socket.emit('vote_started', {
+        alivePlayers: room.assignedPlayers.filter(p => p.alive),
+        startTime: room.voteStartTime,
+        duration: 15 * 1000
+      })
+      return
+    }
     room.state = 'voting'
     room.votes = {}
+    room.voteStartTime = Date.now()
     const alivePlayers = room.assignedPlayers.filter(p => p.alive)
-    io.to(code).emit('vote_started', { alivePlayers })
+
+    io.to(code).emit('vote_started', {
+      alivePlayers,
+      startTime: room.voteStartTime,
+      duration: 15 * 1000
+    })
+
+    // Server-side 15s timer — auto resolve when done
+    room.voteTimer = setTimeout(() => {
+      resolveVote(code)
+    }, 15 * 1000)
   })
 
   socket.on('cast_vote', ({ code, votedId }) => {
     const room = rooms[code]
     if (!room) return
 
-    // Already resolved — re-send result to late voter
-    if (room.state === 'resolving' && room.lastResult) {
+    if ((room.state === 'resolving' || room.state === 'round') && room.lastResult) {
       socket.emit(room.lastResult.event, room.lastResult.data)
       return
     }
@@ -182,10 +271,6 @@ io.on('connection', (socket) => {
 
     io.to(code).emit('vote_update', { totalVotes, needed: alivePlayers.length })
     console.log(`Vote in ${code}: ${totalVotes}/${alivePlayers.length}`)
-
-    if (totalVotes >= alivePlayers.length) {
-      setTimeout(() => resolveVote(code), 1000)
-    }
   })
 
   socket.on('disconnect', () => {
@@ -194,12 +279,18 @@ io.on('connection', (socket) => {
       const room = rooms[code]
       const wasInRoom = room.players.some(p => p.id === socket.id)
       if (!wasInRoom) continue
-      room.players = room.players.filter(p => p.id !== socket.id)
-      if (room.players.length === 0) {
-        delete rooms[code]
-      } else {
-        io.to(code).emit('lobby_update', room.players)
+
+      if (room.host === socket.id) {
+        // Give host 5 mins to reconnect
+        room.deleteTimeout = setTimeout(() => {
+          delete rooms[code]
+          console.log(`Room ${code} deleted after host timeout`)
+        }, 5 * 60 * 1000)
+        return
       }
+
+      // Non-host — keep them in the room, just mark disconnected
+      // They can reconnect via reconnect_player event
     }
   })
 })
