@@ -177,7 +177,7 @@ io.on('connection', (socket) => {
 
     console.log(`Vote in ${code}: ${totalVotes}/${alivePlayers.length}`)
 
-    if (totalVotes >= 1) { // For testing, resolve vote after 1 vote. Change to alivePlayers.length for production
+    if (totalVotes >= alivePlayers.length) { 
       resolveVote(code)
     }
   })
