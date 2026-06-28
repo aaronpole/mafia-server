@@ -85,7 +85,8 @@ io.on('connection', (socket) => {
       round: 1,
       assignedPlayers: [],
       roundStartTime: null,
-      votes: {}
+      votes: {},
+      lastResult: null
     }
     socket.join(code)
     socket.emit('room_created', { code })
@@ -131,9 +132,7 @@ io.on('connection', (socket) => {
   socket.on('start_round', ({ code }) => {
     const room = rooms[code]
     if (!room) return
-    // Only start the timer once — ignore duplicate start_round from other tabs
     if (room.state === 'round' && room.roundStartTime) {
-      // Re-send current state to this socket so they sync up
       socket.emit('round_started', {
         round: room.round,
         startTime: room.roundStartTime,
@@ -156,6 +155,7 @@ io.on('connection', (socket) => {
   socket.on('start_vote', ({ code }) => {
     const room = rooms[code]
     if (!room) return
+    if (room.state === 'voting') return // prevent double trigger
     room.state = 'voting'
     room.votes = {}
     const alivePlayers = room.assignedPlayers.filter(p => p.alive)
@@ -165,15 +165,13 @@ io.on('connection', (socket) => {
   socket.on('cast_vote', ({ code, votedId }) => {
     const room = rooms[code]
     if (!room) return
-    
-    // If already resolved, re-send the last result to this socket
-    if (room.state === 'resolving' || room.state === 'round' || room.state === 'roleReveal') {
-      if (room.lastResult) {
-        socket.emit(room.lastResult.event, room.lastResult.data)
-      }
+
+    // Already resolved — re-send result to late voter
+    if (room.state === 'resolving' && room.lastResult) {
+      socket.emit(room.lastResult.event, room.lastResult.data)
       return
     }
-    
+
     if (room.state !== 'voting') return
     if (room.votes[socket.id] !== undefined) return
 
@@ -187,12 +185,6 @@ io.on('connection', (socket) => {
 
     if (totalVotes >= alivePlayers.length) {
       setTimeout(() => resolveVote(code), 1000)
-    }
-  })
-    console.log(`Vote in ${code}: ${totalVotes}/${alivePlayers.length}`)
-
-    if (totalVotes >= alivePlayers.length) { 
-      resolveVote(code)
     }
   })
 
