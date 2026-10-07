@@ -326,7 +326,11 @@ io.on('connection', (socket) => {
       deleteTimeout: null
     }
     socket.join(code)
-    socket.emit('room_created', { code, reconnectToken: rooms[code].players[0].reconnectToken })
+    socket.emit('room_created', {
+      code,
+      reconnectToken: rooms[code].players[0].reconnectToken,
+      players: publicLobbyPlayers(rooms[code].players)
+    })
     io.to(code).emit('lobby_update', publicLobbyPlayers(rooms[code].players))
     console.log(`Room created: ${code}`)
   })
